@@ -1,0 +1,222 @@
+#!/bin/sh
+
+# Constant definition
+PROGNAME=$(basename $0)
+VERSION="0.1.0"
+DEFAULT_GENERATION=3
+PRIORITY="local0.info"
+
+# Main procedure
+Main(){
+  # Initial setting
+  YYYYMMDD=`date '+%Y%m%d'`
+  
+  if [ -n "$BACKUP_ALL" ]; then
+    OutputMessage "Starting Instance Tag Backup Mode"
+  fi
+  
+  if [ -n "$PROF" ]; then
+    OutputMessage "Setting AWS CLI profile: $PROF"
+  fi
+  
+  if [ -n "$BACKUP_ALL" ]; then
+    filter="Name=tag:Backup, Values=on"
+  else
+    filter="Name=tag:Name, Values=$PRAMS"
+  fi
+
+  # Backup target instance loop 
+  aws $PROF_OPT ec2 describe-instances --filters "$filter" --query "sort_by(Reservations[].Instances[], &PrivateIpAddress)" \
+    | jq -r '.[] | [ .InstanceId, (.Tags[]? | select(.Key == "Name")).Value, (.Tags[]? | select(.Key == "Generation")).Value, (.Tags[]? | select(.Key == "Reboot")).Value ] | @tsv' \
+    | while read line_inst
+  do
+    echo $line_inst
+    CreateAMI $line_inst
+    if [ -z "$ONESHOT" ]; then
+      ManageAMI $line_inst
+    fi
+  done
+  
+  if [ -n "$BACKUP_ALL" ]; then
+    OutputMessage "Finished Instance Tag Backup Mode"
+  fi
+}
+
+# Function definition
+Usage(){
+cat <<EOF
+$PROGNAME - AWS EC2 AMI Backup Tool version $VERSION
+Usage: $PROGNAME [--profile <prof>] [--all | <inst>] [--dry-run] [--reboot] [--oneshot [suffix]]
+      ami_backups --profile prof1 --all
+      ami_backups --profile prof1 inst1
+EOF
+}
+
+CreateAMI(){
+  inst_id=$1
+  inst_nm=$2
+  inst_rb=$4
+  OutputMessage "Create AMI $inst_id $inst_nm"
+  if [ -n "$DRY_RUN" ]; then
+    return
+  fi
+  if [ "$inst_rb" == "on" ]; then
+    reboot="--reboot"
+  fi
+  if [ -n "$REBOOT" ]; then
+    reboot="--reboot"
+  fi
+  if [ -z "$ONESHOT" ]; then
+    name="${YYYYMMDD}_$inst_nm"
+    description="Created by $PROGNAME($inst_id) for ${YYYYMMDD}_$inst_nm"
+  else
+    name="${YYYYMMDD}_${inst_nm}_$ONESHOT_SUFF"
+    description="Created by ${PROGNAME}_oneshot($inst_id) for ${YYYYMMDD}_${inst_nm}_$ONESHOT_SUFF"
+  fi
+  ami_id=$(aws $PROF_OPT ec2 create-image --instance-id $inst_id --name $name --description "$description" $reboot  | jq -r '.ImageId')
+  if [ -n "$ami_id" ]; then
+    aws $PROF_OPT ec2 wait image-available --image-ids $ami_id
+  else
+    OutputMessage "$inst_id $inst_nm Create AMI fail."
+  fi
+}
+
+ManageAMI(){
+  inst_id=$1
+  inst_nm=$2
+  inst_gn=$3
+  if [ -z "$inst_gn" ]; then
+    inst_gn=$DEFAULT_GENERATION
+  fi
+  OutputMessage "Manage AMI Generations $inst_id $inst_nm $inst_gn"
+  if [ -n "$DRY_RUN" ]; then
+    return
+  fi
+  # Target instance AMI loop 
+  count=0
+  aws $PROF_OPT ec2 describe-images --owners self --filters "Name=description, Values=*$PROGNAME($inst_id)*" --query "reverse(sort_by(Images[], &CreationDate))" \
+    | jq -r '.[] | [ .ImageId, .Name, .CreationDate ] | @tsv' \
+    | while read line_ami
+  do
+    count=$((count + 1))
+    if [ $count -gt $inst_gn ]; then
+      #echo $line_ami $count delete
+      DeleteAMI $line_ami
+    else
+      #echo $line_ami $count keep
+      :
+    fi
+  done
+}
+
+DeleteAMI(){
+  ami_id=$1
+  ami_nm=$2
+  OutputMessage "Delete AMI $ami_id $ami_nm"
+  # Deregister target AMI
+  aws $PROF_OPT ec2 deregister-image --image-id $ami_id
+  if [ $? -ne 0 ]; then
+    OutputMessage "$ami_id $ami_nm Delete AMI fail."
+    return
+  fi
+  # Delete target AMI snapshots 
+  aws $PROF_OPT ec2 describe-snapshots --owner-ids self --filters "Name=description, Values=*$ami_id*" --query "Snapshots[]" \
+    | jq -r '.[] | [ .SnapshotId, .Description ] | @tsv' \
+    | while read line_snapshot
+  do
+    #echo $line_snapshot
+    DeleteSnapshot $line_snapshot
+  done
+}
+
+DeleteSnapshot(){
+  snap_id=$1
+  #OutputMessage "Delete Snapshot $snap_id $snap_dc"
+  aws $PROF_OPT ec2 delete-snapshot --snapshot-id $snap_id
+  if [ $? -ne 0 ]; then
+    OutputMessage "$snap_id Delete Snapshot fail."
+    return
+  fi
+}
+
+OutputMessage(){
+  msg=$1
+  echo $msg
+  echo $msg | logger -p $PRIORITY -t $PROGNAME
+}
+
+# no argument
+if [ $# -eq 0 ]; then
+  Usage
+  exit 1
+fi
+
+# getopt
+for OPT in "$@"; do
+  case "$OPT" in
+    '-h'|'--help' )
+      Usage
+      exit 1
+      ;;
+    '--version' )
+      echo $VERSION
+      exit 1
+      ;;
+    '--profile' )
+      if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]]; then
+        echo "$PROGNAME: option requires an argument -- $1" 1>&2
+        exit 1
+      fi
+      PROF="$2"
+      PROF_OPT="--profile $2"
+      shift 2
+      ;;
+    '--all' )
+      BACKUP_ALL="TRUE"
+      shift 1
+      ;;
+    '--dry-run' )
+      DRY_RUN="TRUE"
+      shift 1
+      ;;
+    '--reboot' )
+      REBOOT="TRUE"
+      shift 1
+      ;;
+    '--oneshot' )
+      ONESHOT="TRUE"
+      if [[ -z "$2" ]] || [[ "$2" =~ ^-+ ]]; then
+        ONESHOT_SUFF=`date '+%H%M%S'`
+        shift
+      else
+        ONESHOT_SUFF="$2"
+        shift 2
+      fi
+      ;;
+    '--'|'-' )
+      shift 1
+      PRAMS+=( "$@" )
+      break
+      ;;
+    -*)
+      echo "$PROGNAME: illegal option -- '$(echo $1 | sed 's/^-*//')'" 1>&2
+      exit 1
+      ;;
+    *)
+      if [[ ! -z "$1" ]] && [[ ! "$1" =~ ^-+ ]]; then
+        #PRAMS=( ${PRAMS[@]} "$1" )
+        PRAMS+=( "$1" )
+        shift 1
+      fi
+      ;;
+  esac
+done
+
+#if [ -z $PRAMS ]; then
+#  echo "$PROGNAME: too few arguments" 1>&2
+#  echo "Try '$PROGNAME --help' for more information." 1>&2
+#  exit 1
+#fi
+
+# call main
+Main
