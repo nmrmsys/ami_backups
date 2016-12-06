@@ -2,7 +2,7 @@ ami_backups - AWS EC2 AMI Backup Tool
 ====
 
 ## Usage
- ami_backups [--profile <prof>] [--all | <inst>] [--dry-run] [--reboot] [--oneshot [suffix]]
+ ami_backups [--profile &lt;prof&gt;] [--all | &lt;inst&gt;] [--dry-run] [--reboot] [--oneshot [suffix]] [--no-wait]
 
 Tag Setting Backup Mode
 

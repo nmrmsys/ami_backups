@@ -30,11 +30,11 @@ Main(){
     | jq -r '.[] | [ .InstanceId, (.Tags[]? | select(.Key == "Name")).Value, (.Tags[]? | select(.Key == "Generation")).Value, (.Tags[]? | select(.Key == "Reboot")).Value ] | @tsv' \
     | while read line_inst
   do
-    echo $line_inst
-    CreateAMI $line_inst
+    #echo $line_inst
     if [ -z "$ONESHOT" ]; then
       ManageAMI $line_inst
     fi
+    CreateAMI $line_inst
   done
   
   if [ -n "$BACKUP_ALL" ]; then
@@ -46,7 +46,7 @@ Main(){
 Usage(){
 cat <<EOF
 $PROGNAME - AWS EC2 AMI Backup Tool version $VERSION
-Usage: $PROGNAME [--profile <prof>] [--all | <inst>] [--dry-run] [--reboot] [--oneshot [suffix]]
+Usage: $PROGNAME [--profile <prof>] [--all | <inst>] [--dry-run] [--reboot] [--oneshot [suffix]] [--no-wait]
       ami_backups --profile prof1 --all
       ami_backups --profile prof1 inst1
 EOF
@@ -56,16 +56,8 @@ CreateAMI(){
   inst_id=$1
   inst_nm=$2
   inst_rb=$4
-  OutputMessage "Create AMI $inst_id $inst_nm"
-  if [ -n "$DRY_RUN" ]; then
-    return
-  fi
-  if [ "$inst_rb" == "on" ]; then
-    reboot="--reboot"
-  fi
-  if [ -n "$REBOOT" ]; then
-    reboot="--reboot"
-  fi
+
+  # name, description setting
   if [ -z "$ONESHOT" ]; then
     name="${YYYYMMDD}_$inst_nm"
     description="Created by $PROGNAME($inst_id) for ${YYYYMMDD}_$inst_nm"
@@ -73,9 +65,26 @@ CreateAMI(){
     name="${YYYYMMDD}_${inst_nm}_$ONESHOT_SUFF"
     description="Created by ${PROGNAME}_oneshot($inst_id) for ${YYYYMMDD}_${inst_nm}_$ONESHOT_SUFF"
   fi
+
+  OutputMessage "Create AMI $inst_id $inst_nm $name"
+  if [ -n "$DRY_RUN" ]; then
+    return
+  fi
+
+  # reboot option setting
+  if [ "$inst_rb" == "on" ]; then
+    reboot="--reboot"
+  fi
+  if [ -n "$REBOOT" ]; then
+    reboot="--reboot"
+  fi
+
+  # create ami
   ami_id=$(aws $PROF_OPT ec2 create-image --instance-id $inst_id --name $name --description "$description" $reboot  | jq -r '.ImageId')
   if [ -n "$ami_id" ]; then
-    aws $PROF_OPT ec2 wait image-available --image-ids $ami_id
+    if [ -z "$NO_WAIT" ]; then
+      aws $PROF_OPT ec2 wait image-available --owners self --image-ids $ami_id
+    fi
   else
     OutputMessage "$inst_id $inst_nm Create AMI fail."
   fi
@@ -99,7 +108,7 @@ ManageAMI(){
     | while read line_ami
   do
     count=$((count + 1))
-    if [ $count -gt $inst_gn ]; then
+    if [ $count -ge $inst_gn ]; then
       #echo $line_ami $count delete
       DeleteAMI $line_ami
     else
@@ -127,6 +136,11 @@ DeleteAMI(){
     #echo $line_snapshot
     DeleteSnapshot $line_snapshot
   done
+
+  # It does not work well, why?
+  #if [ -z "$NO_WAIT" ]; then
+  #  aws $PROF_OPT ec2 wait image-exists --owners self --image-ids $ami_id
+  #fi
 }
 
 DeleteSnapshot(){
@@ -192,6 +206,10 @@ for OPT in "$@"; do
         ONESHOT_SUFF="$2"
         shift 2
       fi
+      ;;
+    '--no-wait' )
+      NO_WAIT="TRUE"
+      shift 1
       ;;
     '--'|'-' )
       shift 1
