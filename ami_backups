@@ -72,11 +72,12 @@ CreateAMI(){
   fi
 
   # reboot option setting
+  reboot="--no-reboot"
   if [ "$inst_rb" == "on" ]; then
     reboot="--reboot"
   fi
   if [ -n "$REBOOT" ]; then
-    reboot="--reboot"
+    reboot="$REBOOT"
   fi
 
   # create ami
@@ -194,7 +195,11 @@ for OPT in "$@"; do
       shift 1
       ;;
     '--reboot' )
-      REBOOT="TRUE"
+      REBOOT="--reboot"
+      shift 1
+      ;;
+    '--no-reboot' )
+      REBOOT="--no-reboot"
       shift 1
       ;;
     '--oneshot' )
